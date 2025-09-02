@@ -638,12 +638,6 @@ class BaseLlmFlow(ABC):
       if auth_event:
         yield auth_event
 
-      tool_confirmation_event = functions.generate_request_confirmation_event(
-          invocation_context, function_call_event, function_response_event
-      )
-      if tool_confirmation_event:
-        yield tool_confirmation_event
-
       # Always yield the function response event first
       yield function_response_event
 
@@ -883,6 +877,7 @@ class BaseLlmFlow(ABC):
           invocation_context,
           flush_user_audio=False,
           flush_model_audio=True,
+          save=False,  # Use fast cache clearing for responsiveness
       )
     elif llm_response.turn_complete:
       # turn completes so we can flush both user and model
@@ -890,6 +885,7 @@ class BaseLlmFlow(ABC):
           invocation_context,
           flush_user_audio=True,
           flush_model_audio=True,
+          save=False,  # Use fast cache clearing for responsiveness
       )
     elif getattr(llm_response, 'generation_complete', False):
       # model generation complete so we can flush model audio
@@ -897,6 +893,7 @@ class BaseLlmFlow(ABC):
           invocation_context,
           flush_user_audio=False,
           flush_model_audio=True,
+          save=False,  # Use fast cache clearing for responsiveness
       )
 
     # Log cache statistics if enabled

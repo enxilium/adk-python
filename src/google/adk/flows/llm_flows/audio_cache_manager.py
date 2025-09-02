@@ -86,6 +86,7 @@ class AudioCacheManager:
       invocation_context: InvocationContext,
       flush_user_audio: bool = True,
       flush_model_audio: bool = True,
+      save: bool = True,
   ) -> None:
     """Flush audio caches to session and artifact services.
 
@@ -101,7 +102,22 @@ class AudioCacheManager:
       invocation_context: The invocation context containing audio caches.
       flush_user_audio: Whether to flush the input (user) audio cache.
       flush_model_audio: Whether to flush the output (model) audio cache.
+      save: Whether to save audio data to artifact/session services. If False,
+            caches are cleared without I/O operations for better performance.
     """
+    if not save:
+      # Fast path: Clear caches without saving to prevent memory leaks
+      if flush_user_audio and invocation_context.input_realtime_cache:
+        invocation_context.input_realtime_cache = []
+        logger.debug('Cleared input audio cache (saving disabled)')
+
+      if flush_model_audio and invocation_context.output_realtime_cache:
+        invocation_context.output_realtime_cache = []
+        logger.debug('Cleared output audio cache (saving disabled)')
+      
+      return
+
+    # Original path: Save to artifact and session services
     if flush_user_audio and invocation_context.input_realtime_cache:
       success = await self._flush_cache_to_services(
           invocation_context,
