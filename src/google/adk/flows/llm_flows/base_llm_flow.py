@@ -83,22 +83,151 @@ class BaseLlmFlow(ABC):
     self.audio_cache_manager = AudioCacheManager()
     self.transcription_manager = TranscriptionManager()
 
+  async def _prepare_llm_request(
+      self,
+      invocation_context: InvocationContext,
+  ) -> tuple[LlmRequest, AsyncGenerator[Event, None] | None]:
+    """Prepares the LLM request by running preprocessing.
+    
+    This method can be called independently to pre-initialize tools and
+    configurations before establishing live connections.
+    
+    Args:
+      invocation_context: The invocation context.
+      
+    Returns:
+      A tuple of (llm_request, preprocessing_events_generator).
+      If invocation should end, returns (llm_request, None).
+    """
+    llm_request = LlmRequest()
+    
+    async def _preprocess_generator():
+      async with Aclosing(
+          self._preprocess_async(invocation_context, llm_request)
+      ) as agen:
+        async for event in agen:
+          yield event
+    
+    # Check if invocation should end after preprocessing
+    preprocessing_events = _preprocess_generator()
+    events_to_yield = []
+    
+    async with Aclosing(preprocessing_events) as agen:
+      async for event in agen:
+        events_to_yield.append(event)
+    
+    if invocation_context.end_invocation:
+      return llm_request, None
+    
+    # Return the events generator if there are events to yield
+    async def _yield_collected_events():
+      for event in events_to_yield:
+        yield event
+    
+    return llm_request, _yield_collected_events() if events_to_yield else None
+
+  async def prepare_for_live_connection(
+      self,
+      invocation_context: InvocationContext,
+  ) -> LlmRequest:
+    """Pre-prepares the LLM request for a live connection.
+    
+    This method runs all preprocessing (including MCP tool initialization)
+    without establishing the live connection. The returned LlmRequest can
+    then be passed to run_live() to avoid initialization overhead.
+    
+    Args:
+      invocation_context: The invocation context.
+      
+    Returns:
+      A prepared LlmRequest ready for live connection.
+      
+    Raises:
+      ValueError: If invocation should end during preprocessing.
+    """
+    llm_request, preprocessing_events = await self._prepare_llm_request(
+        invocation_context
+    )
+    
+    # Consume any preprocessing events (though they won't be yielded)
+    if preprocessing_events:
+      async with Aclosing(preprocessing_events) as agen:
+        async for _ in agen:
+          pass  # Consume events but don't yield them
+    
+    if invocation_context.end_invocation:
+      raise ValueError("Invocation ended during preprocessing")
+    
+    return llm_request
+
+  async def warm_up_mcp_connections(
+      self,
+      invocation_context: InvocationContext,
+  ) -> None:
+    """Pre-connects to MCP servers and caches tool listings.
+    
+    This method specifically targets MCP toolsets for pre-connection,
+    avoiding the overhead during live connection establishment.
+    
+    Args:
+      invocation_context: The invocation context.
+    """
+    from ...agents.llm_agent import LlmAgent
+    from ...tools.mcp_tool.mcp_toolset import MCPToolset
+
+    agent = invocation_context.agent
+    if not isinstance(agent, LlmAgent):
+      return
+
+    # Find all MCP toolsets in the agent's tools
+    mcp_toolsets = []
+    for tool_union in agent.tools:
+      if isinstance(tool_union, MCPToolset):
+        mcp_toolsets.append(tool_union)
+
+    if not mcp_toolsets:
+      return
+
+    # Pre-connect to all MCP toolsets in parallel
+    async def warm_up_toolset(toolset: MCPToolset):
+      try:
+        # This will trigger session creation and tool listing
+        await toolset.get_tools(ReadonlyContext(invocation_context))
+        logger.debug(f"Warmed up MCP toolset: {toolset}")
+      except Exception as e:
+        logger.warning(f"Failed to warm up MCP toolset {toolset}: {e}")
+
+    await asyncio.gather(
+        *[warm_up_toolset(toolset) for toolset in mcp_toolsets],
+        return_exceptions=True
+    )
+
   async def run_live(
       self,
       invocation_context: InvocationContext,
+      prepared_llm_request: LlmRequest | None = None,
   ) -> AsyncGenerator[Event, None]:
-    """Runs the flow using live api."""
-    llm_request = LlmRequest()
+    """Runs the flow using live api.
+    
+    Args:
+      invocation_context: The invocation context.
+      prepared_llm_request: Optional pre-prepared LLM request. If not provided,
+        will call _prepare_llm_request internally.
+    """
     event_id = Event.new_id()
-
-    # Preprocess before calling the LLM.
-    async with Aclosing(
-        self._preprocess_async(invocation_context, llm_request)
-    ) as agen:
-      async for event in agen:
-        yield event
-    if invocation_context.end_invocation:
-      return
+    
+    if prepared_llm_request is not None:
+      llm_request = prepared_llm_request
+    else:
+      llm_request, preprocessing_events = await self._prepare_llm_request(
+          invocation_context
+      )
+      if preprocessing_events:
+        async with Aclosing(preprocessing_events) as agen:
+          async for event in agen:
+            yield event
+      if invocation_context.end_invocation:
+        return
 
     llm = self.__get_llm(invocation_context)
     logger.debug(
@@ -411,14 +540,13 @@ class BaseLlmFlow(ABC):
       invocation_context: InvocationContext,
   ) -> AsyncGenerator[Event, None]:
     """One step means one LLM call."""
-    llm_request = LlmRequest()
-
-    # Preprocess before calling the LLM.
-    async with Aclosing(
-        self._preprocess_async(invocation_context, llm_request)
-    ) as agen:
-      async for event in agen:
-        yield event
+    llm_request, preprocessing_events = await self._prepare_llm_request(
+        invocation_context
+    )
+    if preprocessing_events:
+      async with Aclosing(preprocessing_events) as agen:
+        async for event in agen:
+          yield event
     if invocation_context.end_invocation:
       return
 
