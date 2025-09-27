@@ -88,7 +88,7 @@ class AudioCacheManager:
       flush_model_audio: bool = True,
       save: bool = True,
   ) -> None:
-    """Flush audio caches to session and artifact services.
+    """Flush audio caches to artifact services.
 
     The multimodality data is saved in artifact service in the format of
     audio file. The file data reference is added to the session as an event.
@@ -119,24 +119,23 @@ class AudioCacheManager:
 
     # Original path: Save to artifact and session services
     if flush_user_audio and invocation_context.input_realtime_cache:
-      success = await self._flush_cache_to_services(
+      flush_success = await self._flush_cache_to_services(
           invocation_context,
           invocation_context.input_realtime_cache,
           'input_audio',
       )
-      if success:
+      if flush_success:
         invocation_context.input_realtime_cache = []
-        logger.debug('Flushed input audio cache')
 
     if flush_model_audio and invocation_context.output_realtime_cache:
-      success = await self._flush_cache_to_services(
+      logger.debug('Flushed output audio cache')
+      flush_success = await self._flush_cache_to_services(
           invocation_context,
           invocation_context.output_realtime_cache,
           'output_audio',
       )
-      if success:
+      if flush_success:
         invocation_context.output_realtime_cache = []
-        logger.debug('Flushed output audio cache')
 
   async def _flush_cache_to_services(
       self,
@@ -144,7 +143,7 @@ class AudioCacheManager:
       audio_cache: list[RealtimeCacheEntry],
       cache_type: str,
   ) -> bool:
-    """Flush a list of audio cache entries to session and artifact services.
+    """Flush a list of audio cache entries to artifact services.
 
     The artifact service stores the actual blob. The session stores the
     reference to the stored blob.
@@ -207,11 +206,6 @@ class AudioCacheManager:
           timestamp=audio_cache[0].timestamp,
       )
 
-      # Add to session
-      await invocation_context.session_service.append_event(
-          invocation_context.session, audio_event
-      )
-
       logger.debug(
           'Successfully flushed %s cache: %d chunks, %d bytes, saved as %s',
           cache_type,
@@ -219,7 +213,7 @@ class AudioCacheManager:
           len(combined_audio_data),
           filename,
       )
-      return True
+      return audio_event
 
     except Exception as e:
       logger.error('Failed to flush %s cache: %s', cache_type, e)
